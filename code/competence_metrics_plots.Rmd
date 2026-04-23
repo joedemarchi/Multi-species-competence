@@ -1,0 +1,1085 @@
+---
+title: "multi_sp_plots"
+author: "Joe DeMarchi"
+date: "2025-10-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Libraries
+```{r}
+library(lme4)
+library(ggplot2)
+library(ggpubr)
+library(data.table)
+library(rethinking)
+library(dplyr)
+library(cowplot)
+
+setwd("C:/Users/demar/OneDrive/Documents/UTK/Research/Projects/multi_sp_competence")
+```
+
+### load Rds files
+```{r}
+growth_summary <- readRDS("sum_stats/growth_summary.rds")
+growth_hpdi <- readRDS("sum_stats/growth_hpdi.rds")
+growth_trajectory <- readRDS("sum_stats/growth_trajectory.rds")
+
+transmission_summary <- readRDS("sum_stats/transmission_summary.rds")
+transmission_hpdi  <- readRDS("sum_stats/transmission_hpdi.rds")
+transmission_traj <- readRDS("sum_stats/transmission_traj.rds")
+
+initial_infection_summary <- readRDS("sum_stats/initial_infection_summary.rds")
+initial_infection_hpdi <- readRDS("sum_stats/initial_infection_hpdi.rds")
+
+shedding_summary <- readRDS("sum_stats/shedding_summary.rds")
+shedding_hpdi <- readRDS("sum_stats/shedding_hpdi.rds")
+
+```
+
+## load adult species data
+
+```{r}
+# all adult species
+load("data/ipm_dat.RData")
+# green frogs
+load("data/green_ipm.Rdata")
+# newts
+load("data/newt_ipm.Rdata")
+# bullfrog adults
+load("data/bull_ipm.Rdata")
+
+```
+
+
+
+## Load tadpole species data
+```{r}
+btad <- fread("data/btad_master.csv")
+```
+
+
+### Setup tadpole data
+```{r}
+# setup data
+# isolate mouth qty and shed
+
+btad <- btad %>%
+  mutate(
+    dose_label = case_when(
+      dose == 1e5 ~ "1x10^5",
+      dose == 1e6 ~ "1x10^6",
+      dose == 1e7 ~ "1x10^7",
+      TRUE ~ NA_character_  # catch any unexpected values
+    ),
+    # numeric log10 dose level
+    dose_level = log10(dose)
+  )
+
+# remove NA
+btad <- na.omit(btad)
+```
+
+## Average infection load across species
+```{r}
+head(btad)
+## plot trajectories
+# 
+# set up data including 0's
+cols <- c("ID", "trt", "day", "swabZE", "species", "waterZE10")
+dat <- rbind(
+  green[, ..cols], 
+  newt[, ..cols],
+  bull[, ..cols]
+) 
+
+cols_tad <- c("id","dose", "mouth_qty", "shed_qty", "takedown_day")
+
+dat <- dat %>%
+  select(all_of(cols)) %>%
+  filter(swabZE > 0) %>%
+  mutate(
+    logswab = log(swabZE)
+  )
+
+dat_tad <- btad %>%
+  select(all_of(cols_tad)) %>%
+  filter(mouth_qty > 0) %>% 
+  mutate(
+    species = "Tadpole",
+    logswab = log(mouth_qty)
+  )
+
+mean_swab <- data.frame(
+  species = c("R.catesbeianus", "R.clamitans", "N.viridescens", "Tadpole"),
+  mean_logswab = c(
+    mean(dat$logswab[dat$species == "R.catesbeianus"], na.rm = TRUE),
+    mean(dat$logswab[dat$species == "R.clamitans"], na.rm = TRUE),
+    mean(dat$logswab[dat$species == "N.viridescens"], na.rm = TRUE),
+    mean(dat_tad$logswab, na.rm = TRUE)),
+  logswab_se = c(
+    sd(dat$logswab[dat$species == "R.catesbeianus"], na.rm = TRUE) / sqrt(sum(!is.na(dat$logswab[dat$species == "R.catesbeianus"]))),
+    sd(dat$logswab[dat$species == "R.clamitans"], na.rm = TRUE) / sqrt(sum(!is.na(dat$logswab[dat$species == "R.clamitans"]))),
+    sd(dat$logswab[dat$species == "N.viridescens"], na.rm = TRUE) / sqrt(sum(!is.na(dat$logswab[dat$species == "N.viridescens"]))),
+    sd(dat_tad$logswab, na.rm = TRUE) / sqrt(nrow(dat_tad)
+  ))
+  )
+
+
+mean_load_plot <- ggplot(mean_swab, aes(x = species, y = mean_logswab, fill = species)) +
+  # Draw error bars first (behind)
+  geom_errorbar(aes(ymin = mean_logswab - logswab_se, ymax = mean_logswab + logswab_se),
+                width = 0.15, linewidth = 1, color = "gray23") +  # keep neutral outline
+  # Draw points second (in front)
+  geom_point(size = 5, shape = 21, stroke = 1.2, color = "gray23") +
+  theme_classic() +
+  scale_fill_manual(values = c(
+    "R.catesbeianus" = "tan4", 
+    "R.clamitans"   = "forestgreen", 
+    "N.viridescens" = "darkorange3",
+    "Tadpole"       = "aquamarine4"
+  )) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(x = NULL, y = "log(load)")
+
+avg_load_plt <- ggpar(mean_load_plot,
+  ylab = "log(load)",
+  font.y = c(20),
+  font.tickslab = c(16),
+  legend.position = "none"
+)
+
+ggsave("plots/avg_load_plot.png", avg_load_plt, width = 6, height = 7)
+
+```
+
+
+# Susceptibility/Transmission
+```{r}
+
+head(btad)
+tdat <- btad
+tdat$infec <- as.numeric(tdat$mouth_qty > 0)
+names(tdat)
+tdat$ln_dose <- log(tdat$dose)
+tdat$dose10 <- log10(tdat$dose)
+
+
+# Build model
+tmod <- alist(
+  infec ~ dbern(p),
+  logit(p) <- b0  + b1*ln_dose,
+  b0 ~ dnorm(0, 2),
+  b1 ~ dnorm(0, 2)
+)
+
+## setup the rest of data
+stan_data = tdat[,c("infec", "ln_dose")]
+
+# Fit the model
+tmod_fit = ulam(tmod, data = stan_data, iter = 5000, 
+                warmup = 1000, chains = 4, cores = 4, log_lik = TRUE)
+
+# Extract posterior samples
+
+t_post <- extract.samples(tmod_fit)
+
+```
+
+
+## setup transmission data for plotting
+```{r}
+max_dose = log(1e7)
+min_dose = log(1e4)
+
+t_df = data.frame(species=rep(1, 100),
+                  ln_dose=seq(min_dose, max_dose, length.out=100)) 
+
+# calculate posteriors for each load
+tres = link(tmod_fit, t_df)
+
+#summarize
+med_pred = apply(tres, 2, median)
+lower = apply(tres, 2, quantile, 0.025)
+upper = apply(tres, 2, quantile, 0.975)
+
+
+#combine into l_df
+t_df$pred = med_pred 
+t_df$lower = lower 
+t_df$upper = upper
+
+
+#__________________________________________________________#
+
+# Extract from new data posteriors to plot intercepts and slopes at mean dose
+
+# mean dose is 5.5 so select two doses around mean
+dose_1 = log(10^5.45)
+dose_2 = log(10^5.55)
+mean_dose = log(10^5.5)
+
+#mean_dose_idx <- which.min(abs(as.numeric(t_df$ln_dose)))
+# nearest values for targets
+mean_dose_idx <- which.min(abs(t_df$ln_dose - mean_dose))
+dose_1_idx    <- which.min(abs(t_df$ln_dose - dose_1))
+dose_2_idx    <- which.min(abs(t_df$ln_dose - dose_2))
+
+# extract posteriors
+mean_res  <- tres[, mean_dose_idx, drop = FALSE] # p(dose = 5.5) posterior for each species
+dose1_res <- tres[, dose_1_idx,    drop = FALSE] # p(dose = 5.45) posterior
+dose2_res <- tres[, dose_2_idx,    drop = FALSE] # p(dose = 5.55) posterior for each species
+
+# Find hpdi
+sp_names <- c("Tadpole")
+
+
+tint_hpdi <- HPDI(mean_res, prob = 0.95)
+tint_df <- data.frame(
+  species = sp_names,
+  median = median(mean_res),
+  #lower = unname(tint_hpdi[1]),
+  #upper = unname(tint_hpdi[2]),
+  lower = quantile(mean_res, 0.025),
+  upper = quantile(mean_res, 0.975),
+  row.names = NULL)
+
+# long draws for violin
+tint_plot <- data.frame(
+  species = rep(sp_names, each = nrow(mean_res)),
+  intercept = as.vector(mean_res)
+)
+#__________________________________________________________#
+## Slope
+
+# Use logit scale
+logit_dose1_res <- log(dose1_res/ (1 - dose1_res)) # linearize on logit scale
+logit_dose2_res <- log(dose2_res/ (1 - dose2_res)) #linearize on logit scale
+
+
+#calculate slope for each posterior sample
+slope_res <- (logit_dose2_res - logit_dose1_res) / (dose_2-dose_1)  # matrix with species as columns
+
+#convert to data frame
+tslope_res_df <- as.data.frame(slope_res)
+colnames(tslope_res_df) <- c("Tadpole")
+
+#summarize posterior slope distribution per species
+t_slope <- data.frame(
+  species = colnames(tslope_res_df),
+  median = median(tslope_res_df$Tadpole),
+  lower = apply(tslope_res_df, 2, quantile, 0.025),
+  upper = apply(tslope_res_df, 2, quantile, 0.975)
+)
+
+## Calculate slope HPDI
+tslope_hpdi <- apply(slope_res, 2, HPDI, prob = 0.95)
+tslope_df <- data.frame(
+  species = sp_names,
+  median  = apply(slope_res, 2, median),
+  lower   = tslope_hpdi[1,],
+  upper   = tslope_hpdi[2,],
+  row.names = NULL
+)
+
+tslope_draw <- data.frame(
+  species = rep(sp_names, each = nrow(slope_res)),
+  slope = as.vector(slope_res)
+)
+
+
+```
+
+### Plot transmission results with all species
+
+```{r}
+# isolate intercepts
+tran_sum <- transmission_summary[["intercept"]]
+tall_int <- rbind(tran_sum, tint_df)
+
+# load violins
+  
+## Plot by mean dose
+t_int_plot <- ggplot(tall_int, aes(x = species, y = median, color = species)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), 
+                width = 0.2,
+                linewidth = 1,
+                color = "black") +  # Add error bars
+  geom_point(size = 5,
+             shape = 21,
+             stroke = 0.5,
+             aes(fill = species), color = "black") +  # Add points
+  geom_violin(data = tint_plot, 
+              aes(x = species, y = intercept, fill = species),
+              alpha = 0.3,
+              trim = FALSE,
+              width = 0.8,
+              inherit.aes = FALSE) +  # Add violin for tadpole
+  geom_violin(data = transmission_hpdi[["intercept"]], 
+              aes(x = species, y = intercept, fill = species),
+              alpha = 0.3,
+              trim = FALSE,
+              width = 0.8,
+              inherit.aes = FALSE) +  # Add violin for other species
+  theme_classic() + 
+  labs(
+    x = NULL,
+    y = "Infection probability"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    legend.position = "none"  # Remove legend since species are on x-axis
+  ) +
+  scale_fill_manual(values = c("R.catesbeianus" = "tan4", 
+                               "R.clamitans" = "forestgreen", 
+                               "N.viridescens" = "darkorange3",
+                               "Tadpole" = "aquamarine4")) +  # Fill for points
+  scale_color_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "N.viridescens" = "darkorange3",
+                                "Tadpole" = "aquamarine4"))   # Color for legend
+
+### ________________________________________________________________________##
+# Slopes
+
+tran_slope <- transmission_summary[["slope"]]
+tall_slope <- rbind(tran_slope, t_slope)
+
+# plot slopes
+
+t_slope_plot <- ggplot(tall_slope, aes(x = species, y = median, color = species)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), 
+                width = 0.2,
+                linewidth = 1,
+                color = "black") +  # Add error bars
+  geom_point(size = 5,
+             shape = 21,
+             stroke = 0.5,
+             aes(fill = species), color = "black") +  # Add points
+  geom_violin(data = tslope_draw, 
+              aes(x = species, y = slope, fill = species),
+              alpha = 0.3,
+              trim = FALSE,
+              width = 0.8,
+              inherit.aes = FALSE) +  # Add violin for tadpole
+  geom_violin(data = transmission_hpdi[["slope"]], 
+              aes(x = species, y = slope, fill = species),
+              alpha = 0.3,
+              trim = FALSE,
+              width = 0.8,
+              inherit.aes = FALSE) +  # Add violin for other species
+  theme_classic() + 
+  labs(
+    x = NULL,
+    y ="Effect of dose on \n\ infection probability \n\ (logit scale)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    legend.position = "none"  # Remove legend since species are on x-axis
+  ) +
+  scale_fill_manual(values = c("R.catesbeianus" = "tan4", 
+                               "R.clamitans" = "forestgreen", 
+                               "N.viridescens" = "darkorange3",
+                               "Tadpole" = "aquamarine4")) +  # Fill for points
+  scale_color_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "N.viridescens" = "darkorange3",
+                                "Tadpole" = "aquamarine4"))   # Color for legend
+
+###________________________________________________________________________###
+# Fix legends
+
+#make the axis look good
+t_int_plt <- ggpar(t_int_plot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14)
+  
+)
+
+#Fix slope axis
+t_slope_plt <- ggpar(t_slope_plot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14)
+  
+)
+######______________________________________________________________________####
+### Full trajectory plot
+transmission_traj
+t_df$species <- "Tadpole"
+t_df$dose <- t_df$ln_dose/log(10)
+transmission_traj$dose <- transmission_traj$dose/log(10)
+
+tplot <- ggplot() +
+  geom_line(data = t_df, aes(x = dose, y = pred, color = species), linewidth = 1) +
+  geom_ribbon(data = t_df, aes(x = dose, ymin = lower, ymax = upper, fill = species), alpha = 0.1) +
+  geom_line(data = transmission_traj, aes(x = dose, y = pred, color = species), linewidth = 1) +
+  geom_ribbon(data = transmission_traj, aes(x = dose, ymin = lower, ymax = upper, fill = species), alpha = 0.1) +
+  #geom_jitter(aes(x = dose, y = infec, color = species1), alpha = 0.2, height = 0, width = 0.1) +
+  theme_classic() + 
+  xlab("Exposure dose 1x10^ \n\ zoospores/mL") + ylab("Infection probability") + scale_color_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "N.viridescens" = "darkorange3",
+                                "Tadpole" = "aquamarine4")) +
+    scale_fill_manual(values = c(
+    "R.catesbeianus" = "tan4", 
+    "R.clamitans" = "forestgreen", 
+    "N.viridescens" = "darkorange3",
+    "Tadpole" = "aquamarine4")
+  ) +
+      guides(color = guide_legend(title = "Species"),
+         fill = guide_legend(title = "Species")) +
+  theme(axis.ticks.length = unit(-0.15, "cm"))
+ 
+
+
+tplt <- ggpar(tplot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14),
+  legend.title = "Species",
+  font.legend = c(14),
+  
+)
+
+ggsave("plots/transmission_dose_response.png", tplt, width = 6, height = 5)
+
+```
+
+### Combine plots
+```{r}
+#combine plots
+transmission_plt <- (t_int_plt | t_slope_plt) / tplt +
+  plot_layout(
+    widths = c(1, 1),   
+    heights = c(1, 1)
+  ) + 
+    plot_annotation(tag_levels = "A"
+  )
+ggsave("plots/trans_tad_plots.png", transmission_plt, width = 8, height = 8)
+```
+
+
+
+### Growth
+```{r}
+
+# filter data and log load
+gtad <- btad %>%
+  filter(mouth_qty > 0) %>%
+  mutate(
+    load = log(mouth_qty),
+    day  = takedown_day
+  )
+
+# create time level matrix
+time_levels <- sort(unique(gtad$day))
+T <- length(time_levels)
+
+# combine matrix to take down day
+gtad <- gtad %>%
+  mutate(
+    t_index = match(day, time_levels)  
+  )
+
+
+# set up for stan
+stan_dat <- list(
+  N = nrow(gtad),
+  T = T,
+  t_index = gtad$t_index,
+  y = gtad$load
+)
+
+
+grow_mod <- cmdstan_model("growth_tadpole.stan")
+
+fit <- grow_mod$sample(
+  data = stan_dat,
+  chains = 4, iter_warmup = 1000, iter_sampling = 5000, parallel_chains = 4
+)
+
+posterior <- fit$draws(c("a", "b", "sigma", "m", "v"))
+
+fit$summary(c("a","b","sigma","m","v"))
+
+growth_post <- as_draws_df(fit$draws())
+```
+
+### Extract growth posteriors
+
+```{r}
+growth_post <- as_draws_df(fit$draws())
+
+# posterior draws (ndraws-length vectors)
+a_draw <- growth_post$a
+b_draw <- growth_post$b
+#sig_draw <- growth_post$sigma  # only needed if you want yrep
+
+# grid of loads
+load_grid <- seq(min(gtad$load), max(gtad$load), length.out = 300)
+
+# mu[draw, x]  (ndraws x 300)
+mu <- outer(a_draw, rep(1, length(load_grid))) +
+      outer(b_draw, load_grid)
+
+# summarize per x (columns)
+pred_df <- tibble(
+  load  = load_grid,
+  pred  = apply(mu, 2, median),
+  lower = apply(mu, 2, quantile, 0.025),
+  upper = apply(mu, 2, quantile, 0.975)
+)
+
+mean_load <- 3.70
+
+# Posterior estimates plots
+species <- c("Tadpole")
+
+## slope
+
+g_tad_slope2 <- data.table(
+  species = species,
+  slope = median(b_draw),
+  slope_lower = quantile(b_draw, 0.025),
+  slope_upper = quantile(b_draw, 0.975)
+)
+
+sp_names = c("Tadpole")
+
+
+gtint_hpdi2 <- HPDI(a_draw, prob = 0.95)
+gint_plot2 <- data.frame(
+  species = rep(sp_names, length(a_draw)),
+  intercept = as.vector(a_draw)
+)
+
+# update gtad_dist:
+
+gtad_dist2 <- data.table(
+  species = species,
+  intercept = median(a_draw),
+  intercept_lower = unname(gtint_hpdi2[1]),
+  intercept_upper = unname(gtint_hpdi2[2])
+)
+
+
+gslope_plot2 <- data.frame(
+  species = rep(sp_names, length(b_draw)),
+  slope = as.vector(b_draw)
+)
+
+
+gtad_sum <- cbind(gtad_dist2, g_tad_slope2[, -1, with = FALSE])
+
+
+
+```
+
+### Growth trajectory plot
+
+```{r}
+gdat <- growth_trajectory
+pred_df$species1 <- "Tadpole"
+pred_df$species <- 4
+pred_df$loadNext <- NA  # placeholder for loadNext
+
+# find shared column names
+common_cols <- intersect(names(gdat), names(pred_df))
+
+# restrict both data frames
+g_traj <- gdat %>% dplyr::select(all_of(common_cols))
+tad_traj <- pred_df %>% dplyr::select(all_of(common_cols))
+
+# combine
+g_df <- bind_rows(g_traj, tad_traj)
+
+gplot <- ggplot(g_df) +
+  geom_point(aes(x = load, y = loadNext, color = species1), alpha = 0.2) +
+ # geom_line(aes(x = lnload, y = lnwaterload, color = species1), alpha = 0.4) +
+  geom_line(aes(x = load, y = pred, color = species1), linewidth = 1.05) +
+  geom_abline(intercept = 0, slope = 1, color = "black", linetype = "dashed") +
+  geom_ribbon(aes(x = load, ymin = lower, ymax = upper, fill = species1), alpha = 0.1) +
+  theme_classic() + xlab("log(load)") + ylab("log(loadNext)") + scale_color_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "N.viridescens" = "darkorange3",
+                                "Tadpole" = "aquamarine4")) +
+    scale_fill_manual(values = c(
+    "R.catesbeianus" = "tan4", 
+    "R.clamitans" = "forestgreen", 
+    "N.viridescens" = "darkorange3",
+     "Tadpole" = "aquamarine4"
+  )) +
+  theme(axis.ticks.length = unit(-0.15, "cm"))
+
+#make the plot look better
+gplt <- ggpar(gplot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14),
+  legend.title = "Species",
+  font.legend = c(14),
+  
+)
+
+
+
+```
+
+
+### Growth plot
+
+```{r}
+## Intercept
+gall_int <- growth_summary
+tgall_int <- rbind(gall_int, gtad_sum)
+
+
+g_int_plot <- ggplot(tgall_int, aes(x = species, y = intercept, color = species)) +
+  geom_errorbar(aes(ymin = intercept_lower, ymax = intercept_upper), 
+                width = 0.2,
+                linewidth = 1,
+                color = "black") + 
+  geom_point(aes(fill = species), 
+             color = "black",
+             size = 5,
+             shape = 21,
+             stroke = 0.5) +  
+  geom_violin(data = gint_plot2,
+              aes(x = species, y = intercept, fill = species),
+              alpha = 0.3,
+              trim = FALSE,
+              inherit.aes = FALSE) +
+  geom_violin(data = growth_hpdi[["intercept"]],
+              aes(x = species, y = int_violin, fill = species),
+              alpha = 0.3,
+              trim = FALSE,
+              inherit.aes = FALSE) +
+  theme_classic() + 
+  labs(
+    x = NULL,
+    y = "log(Bd growth rate)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  scale_fill_manual(values = c("R.catesbeianus" = "tan4", 
+                               "R.clamitans" = "forestgreen", 
+                               "N.viridescens" = "darkorange3",
+                               "Tadpole" = "aquamarine4")) +  
+  scale_color_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "N.viridescens" = "darkorange3",
+                                "Tadpole" = "aquamarine4"))   
+
+##____________________________________________________________________________##
+
+### slope
+
+
+g_slope_plot <- ggplot(tgall_int, aes(x = species, y = slope, color = species)) +
+  geom_errorbar(aes(ymin = slope_lower, ymax = slope_upper), 
+                width = 0.2,
+                linewidth = 1,
+                color = "black") +
+  geom_point(size = 5,
+             shape = 21,
+             stroke = 0.5,
+             aes(fill = species), color = "black") + 
+  geom_violin(data = gslope_plot2,
+              aes(x = species, y = slope, fill = species),
+              alpha = 0.3,
+              trim = FALSE,
+              inherit.aes = FALSE) +
+  geom_violin(data = growth_hpdi[["slope"]],
+              aes(x = species, y = slope, fill = species),
+              alpha = 0.3,
+              trim = FALSE,
+              inherit.aes = FALSE) +  # add violin of of other species
+  theme_classic() + 
+  labs(
+    x = NULL,
+    y ="Effect of load on \n\ growth \n\ (log zoospores)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # rotate x-axis labels
+    legend.position = "none"  # remove legend
+  ) +
+  scale_fill_manual(values = c("R.catesbeianus" = "tan4", 
+                               "R.clamitans" = "forestgreen", 
+                               "N.viridescens" = "darkorange3",
+                               "Tadpole" = "aquamarine4")) + 
+  scale_color_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "N.viridescens" = "darkorange3",
+                                "Tadpole" = "aquamarine4")) 
+
+###________________________________________________________________________##
+# Fix plots
+
+ # fix up intercept plot
+g_int_plt <- ggpar(g_int_plot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14)
+  
+)
+#fix up slope plot
+g_slope_plt <- ggpar(g_slope_plot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14)
+  
+)
+
+
+```
+### Combine growth plots
+
+```{r}
+library(patchwork)
+
+growth_plt <- (g_int_plt | g_slope_plt) / gplt +
+  plot_layout(
+    widths = c(1, 1),   
+    heights = c(1, 1)
+  ) + 
+    plot_annotation(tag_levels = "A"
+  )
+
+
+# save growth plot
+ggsave("plots/growth_tad_plots_multi.png", growth_plt, width = 8, height = 8)
+
+```
+
+
+
+# Shedding
+
+```{r}
+tad = fread("data/btad_master.csv")
+## needed columns
+cols <- c("id", "dose", "mouth_qty", "shed_qty")
+# Drop the instances where
+# Newts
+trun_tad_dat <- tad[!(shed_qty == 0 & mouth_qty == 0) & !is.na(shed_qty) & !is.na(mouth_qty), ..cols]
+
+shedding_mod = cmdstan_model("shedding_model1.stan")
+# create species index
+trun_tad_dat$species <- coerce_index(as.factor(trun_tad_dat$species))
+
+# prepare data for inclusion in model
+N = nrow(trun_tad_dat)
+M = sum(trun_tad_dat$mouth_qty == 0) # Missing swabs
+P = sum(trun_tad_dat$shed_qty == 0)
+
+# Missing load
+missing_ind = rep(0, N)
+missing_ind[which(trun_tad_dat$mouth_qty == 0)] = 1:M
+
+#Missing shed
+missing_shed_ind = rep(0, N)
+missing_shed_ind[which(trun_tad_dat$shed_qty == 0)] = 1:P
+
+# rename and transform columns to fit into stan model
+stan_data = list(N=N,
+                 M=M,
+                 P=P,
+                 load=trun_tad_dat$mouth_qty,
+                 shedding=trun_tad_dat$shed_qty,
+                 missing_ind=missing_ind,
+                 missing_shed_ind=missing_shed_ind)
+
+#fit the model
+tad_fit = shedding_mod$sample(data = stan_data,
+                                    chains = 4,
+                                    iter_warmup = 1000,
+                                    iter_sampling = 5000,
+                                    parallel_chains = 4)
+
+
+tad_post <- as_draws_df(tad_fit$draws())
+
+# Extract posterior samples for species-specific parameters
+beta0 <- as.matrix(tad_post[, grep("beta0", colnames(tad_post))])
+beta1 <- as.matrix(tad_post[, grep("beta1", colnames(tad_post))])
+
+## make a function to pull out mean and confidence intervals
+
+post_stats <- function(post_matrix) {
+  apply(post_matrix, 2, function(col){
+    c(median = mean(col),
+      lower = quantile(col, 0.025),
+      upper = quantile (col, 0.975))
+  })
+}
+
+#calculate the summary statistics
+beta0_tad_sum <- post_stats(beta0)
+beta1_tad_sum <- post_stats(beta1)
+
+
+# Generate posterior predictions for each species
+new_vals <- seq(-3, 12, len = 100)          # Range for predictions
+# Posterior predictions: matrix of [iterations x new_vals]
+post_pred <- sapply(1:length(beta0), function(i) {
+  beta0[i] + beta1[i] * new_vals
+})
+
+# Each column is one value of new_vals — take medians by row
+med <- apply(post_pred, 1, median)
+lower <- apply(post_pred, 1, quantile, probs = 0.025)
+upper <- apply(post_pred, 1, quantile, probs = 0.975)
+
+# create data frame
+pred_tad_stats <- data.frame(
+  new_vals = new_vals,
+  median = med,
+  lower = lower,
+  upper = upper,
+  species1 = rep("Tadpole", each = length(new_vals)))
+
+
+# make intercept and slope data.frame
+
+#make into a data frame
+post_tad_res <- data.frame(
+  species = c("Tadpole"),
+  beta0_med = beta0_tad_sum["median", ],
+  beta0_lower = beta0_tad_sum["lower.2.5%", ],
+  beta0_upper = beta0_tad_sum["upper.97.5%", ],
+  beta1_med = beta1_tad_sum["median", ],
+  beta1_lower = beta1_tad_sum["lower.2.5%", ],
+  beta1_upper = beta1_tad_sum["upper.97.5%", ]
+)
+
+species = c("Tadpole")
+
+## Calculate long hpdi posterior distribution for plotting
+
+b0_plot <- data.frame(
+  species = rep(species, each = nrow(beta0)),
+  intercept = as.vector(beta0)
+)
+
+b1_plot <- data.frame(
+  species = rep(species, each = nrow(beta1)),
+  slope = as.vector(beta1)
+)
+
+
+```
+
+
+### Shedding plots
+
+```{r}
+## load multi_sp data
+sp_post_res <- shedding_summary
+
+post_res_plot <- rbind(sp_post_res, post_tad_res)
+
+# intercept plot
+shed_int_plot <- ggplot(post_res_plot, aes(x = species, y = beta0_med, color = species)) +
+  geom_errorbar(aes(ymin = beta0_lower, ymax = beta0_upper), 
+                width = 0.2,
+                linewidth = 1,
+                color = "black") +  # Add error bars
+  geom_point(size = 5,
+             shape = 21,
+             stroke = 0.5,
+             aes(fill = species), color = "black") +  # Add points
+  geom_violin(data = b0_plot, aes(x = species, y = intercept, fill = species),
+              trim = FALSE,
+              alpha = 0.3,
+              inherit.aes = FALSE) +
+  geom_violin(data = shedding_hpdi[["intercept"]], aes(x = species, y = intercept, fill = species),
+              trim = FALSE,
+              alpha = 0.3,
+              inherit.aes = FALSE) +
+  theme_classic() + 
+  labs(
+    x = NULL,
+    y = "log(Bd shedding rate)"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    legend.position = "none",  # Remove legend since species are on x-axis
+    axis.ticks.length = unit(-0.15, "cm")
+  ) +
+  scale_fill_manual(values = c("R.catesbeianus" = "tan4", 
+                               "R.clamitans" = "forestgreen", 
+                               "N.viridescens" = "darkorange3",
+                               "Tadpole" = "aquamarine4")) +  # Fill for points
+  scale_color_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "N.viridescens" = "darkorange3",
+                                "Tadpole" = "aquamarine4"))  
+
+#_______________________________________________________________________#
+
+# fix intercept plot
+shed_int_plt<- ggpar(shed_int_plot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14)
+  
+)
+
+#____________________________________________________________________________#
+## setup data
+
+### Slopes
+shed_slope_plot <- ggplot(post_res_plot, aes(x = species, y = beta1_med, color = species)) +
+  geom_errorbar(aes(ymin = beta1_lower, ymax = beta1_upper), 
+                width = 0.2,
+                linewidth = 1,
+                color = "black") +  # Add error bars
+  geom_point(size = 5,
+             shape = 21,
+             stroke = 0.5,
+             aes(fill = species), color = "black") +  # Add points
+  geom_violin(data = b1_plot, aes(x = species, y = slope, fill = species),
+              trim = FALSE,
+              alpha = 0.3,
+              inherit.aes = FALSE) +
+  geom_violin(data = shedding_hpdi[["slope"]], aes(x = species, y = slope, fill = species),
+              trim = FALSE,
+              alpha = 0.3,
+              inherit.aes = FALSE) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "tomato3") +  # Add line at 0)
+  theme_classic() + 
+  labs(
+    x = NULL,
+    y = "Effect of load on \n\ Bd shedding rate"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    legend.position = "none",  # Remove legend since species are on x-axis
+    axis.ticks.length = unit(-0.15, "cm")
+  ) +
+  scale_fill_manual(values = c("R.catesbeianus" = "tan4", 
+                               "R.clamitans" = "forestgreen", 
+                               "N.viridescens" = "darkorange3",
+                               "Tadpole" = "aquamarine4")) +  # Fill for points
+  scale_color_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "N.viridescens" = "darkorange3",
+                                "Tadpole" = "aquamarine4"))  
+
+
+
+#____________________________________________________________________________#
+
+# fix slope plot
+shed_slope_plt <- ggpar(shed_slope_plot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14)
+  
+)
+
+
+# Plot
+# set up abline from the mean
+ab <- 4.044998 #mean from multi_species work
+
+# setup data
+
+shed_dat <- readRDS("sum_stats/shedding_multi_sp.rds")
+shed_pred <- readRDS("sum_stats/shedding_post_pred_stats.rds")
+
+trun_tad_dat[, species := as.character(species)]
+trun_tad_dat[, species := 4]
+
+setnames(trun_tad_dat, old = c("mouth_qty", "shed_qty"),
+             new = c("swabZE",   "waterZE10"))
+
+# keep only these columns
+tad_dat <- trun_tad_dat[, .(swabZE, waterZE10, species)]
+
+sp_shed_dat <- shed_dat[, .(swabZE, waterZE10, species)]
+
+shed_all <- rbind(sp_shed_dat, tad_dat)
+
+pred_tad_stats$species <- "4"
+
+pred_all <- rbind(shed_pred, pred_tad_stats)
+
+
+shed_plot <- ggplot() +
+  geom_point(data = shed_all[shed_all$swabZE != 0 & shed_all$waterZE10 != 0, ],
+             aes(x = log(swabZE), y = log(waterZE10), color = as.factor(species)), alpha = 0.3) +
+  # Species-specific lines
+  geom_line(data = pred_all, aes(x = new_vals, y = median, color = species), linewidth = 1.15) +
+  # Ribbons for confidence intervals
+  geom_ribbon(data = pred_all, aes(x = new_vals, ymin = lower, ymax = upper, fill = species), alpha = 0.2) +
+  # Add abline for each species plot
+  geom_abline(slope = 1, intercept = ab, color = "tomato3", linetype = "dashed", linewidth = 0.8) +
+  # Axis labels
+  labs(x = "log(load)", 
+       y = "log(shed)", 
+       color = "Species", 
+       fill = "Species", 
+       group = "Point Type") +
+  # Scales
+  scale_color_manual(values = c("1" = "darkorange3", "2" = "tan4", "3" = "forestgreen", "4" = "aquamarine4"),
+                     labels = c("1" = "N.viridescens", "2" = "R.catesbeianus", "3" = "R.clamitans",
+                                "4" = "Tadpole")) +
+  scale_fill_manual(values = c("1" = "darkorange3", "2" = "tan4", "3" = "forestgreen", "4" = "aquamarine4"),
+                    labels = c("1" = "N.viridescens", "2" = "R.catesbeianus", "3" = "R.clamitans",
+                               "4" = "Tadpole")) +
+  facet_wrap(~species, labeller = labeller(species = c(
+    "1" = "N.viridescens",
+    "2" = "R.catesbeianus",
+    "3" = "R.clamitans",
+    "4" = "Tadpole"
+  ))) +
+  theme_classic() +
+   theme(
+    strip.text = element_text(size = 14, face = "italic"),
+                              legend.position = "none",
+    axis.ticks.length = unit(-0.15, "cm")
+  )
+
+
+#____________________________________________________________________________#
+
+# fix plot axis
+shed_plt <- ggpar(shed_plot,
+  font.x = c(16),
+  font.y = c(16),
+  font.tickslab = c(14)
+)
+
+##_________________________________________________________________________##
+#Full trajectory plot
+
+
+
+
+```
+
+## combine all the plots together
+
+```{r}
+shed_all <- (shed_int_plt | shed_slope_plt) / shed_plt +
+                plot_layout(
+    widths = c(1, 1),   
+    heights = c(1, 1)
+  ) + 
+    plot_annotation(tag_levels = "A"
+  )
+
+ggsave("plots/shed_tad_plots.png", shed_all, width = 8, height = 10)
+```
+

@@ -1,0 +1,1212 @@
+---
+title: "Q1_function"
+author: "Joe DeMarchi"
+date: "2025-08-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# set working directory
+setwd("C:/Users/demar/OneDrive/Documents/UTK/Research/Projects/multi_sp_competence")
+
+
+# Load required packages
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(readr)
+library(data.table)
+```
+
+Load Data
+```{r}
+source("multi_sp_fxns.R")
+
+# load rds files
+# load sp data
+bull <- readRDS("data/bull_dist.rds")
+green <- readRDS("data/green_dist.rds")
+tad <- readRDS("data/btad_dist.rds")
+newt <- readRDS("data/newt_dist.rds")
+
+
+abundance = read.csv("amphibianTN_field/abundance.csv") #Site and species-level abundance
+#abundance$species = factor(abundance$species, levels = species_levels)
+
+abundance_wh <- subset(abundance, site == 15) # Subset for WH site)
+abundance_wh <- subset(abundance_wh, species %in% c("novi", "racl", "raca"))
+
+mean_abundance <- abundance_wh %>%
+  group_by(species) %>%
+  summarize(mean_abundance = mean(abund, na.rm = TRUE),
+            sd_abundance   = sd(abund, na.rm = TRUE),
+            n              = sum(!is.na(abund)),
+            se_abundance   = sd_abundance / sqrt(n),
+            min_abundance  = min(abund, na.rm = TRUE),
+            max_abundance  = max(abund, na.rm = TRUE),
+            .groups = "drop"
+  )
+
+mean_abundance
+
+
+movement_distance <- data.frame(
+  species = c("N.viridescens", "R.clamitans", "R.catesbeianus"),
+  movement_distance = c(10, 40, 30)*0.5 # movement distances in m^3 per 6 days in a pond 0.5 m deep
+)
+```
+
+## Q1. Under what ecological conditions is indirect transmission via a shared environmental zoospore pool sufficient to support Bd persistence?
+
+### Set parameters
+```{r}
+source("multi_sp_fxns_q1.R")
+
+# add in extra parameters needed
+# Load rds files for other parameters
+bull_par <- readRDS("params/bull_demo_pars.rds")
+green_par <- readRDS("params/green_demo_pars.rds")
+newt_par <- readRDS("params/newt_demo_pars.rds")
+
+## 
+# Green ADULTS ____________________________________________________________
+# survival set to 1
+steps_per_year <- round(365/6) # survives about 5 years
+s_year <- 0.60
+green$s0 <- (s_year)^(1/steps_per_year)
+# Movment distance by 6 day time step (m2)
+# converted to movement (m3) in build_transition_matrix function
+green$movement_distance <- 40
+## lower movement bound 20-30
+## upper movement bound 60-80
+# Equilibrium density
+green$df_density <- 238
+### Metamorphosis success
+meta_years_mean <- 1.5
+green$meta_successG <-  1 - exp(-(1/meta_years_mean)/steps_per_year)
+
+##
+# Bullfrog ADULTS ____________________________________________________________
+s_year <- 0.70
+steps_per_year <- round(365/6)
+bull$s0 <- (s_year)^(1/steps_per_year)
+# Movment distance by 6 day time step (m2)
+# converted to movement (m3) in build_transition_matrix function
+bull$movement_distance <- 30
+## lower movement bound: 20-30
+## upper movement bound 60-80
+# bullfrog equilibrium density
+bull$df_density <- 23 # 20
+
+## Metamorphosis Success
+meta_years_mean = 2.5
+bull$meta_successB <- 1 - exp(-(1/meta_years_mean)/steps_per_year)
+
+## Newt ADULTS ____________________________________________________________
+s_year <- 0.50 # adult newts can live up to 13 years but average around 3 so similar to green frogs lets assume 7-9 and
+steps_per_year <- round(365/6)
+newt$s0 <- (s_year)^(1/steps_per_year)
+newt$movement_distance <- 10 # avg 6 day movement
+# newt equilibrium density
+newt$df_density <- 872
+
+#___________________________________________________________________________
+
+# take mean of all parameters
+newt_dist <- lapply(newt, function(x) median(x))
+green_dist <- lapply(green, function(x) median(x))
+bull_dist <- lapply(bull, function(x) median(x))
+
+## Bullfrog tadpoles ___________________________________________________________
+btad <- tad
+# survival set to 1
+s_year <- 0.15
+steps_per_year <- round(365/6)
+sb <- s_year^(1/steps_per_year)
+btad$s0 <- sb
+btad$movement_distance <- 6
+# add loss parameters to tadpole params
+btad$loss_int = bull_dist$loss_int
+btad$loss_slope = bull_dist$loss_slope
+btad$df_density <- 450
+btad$meta_successB <- bull$meta_successB
+btad$K_b <- bull_par$K_b
+btad$emig_meta <- bull_par$emig_meta
+
+
+## Green frog tadpoles ___________________________________________________________
+gtad <- tad
+# survival set to 1
+s_year <- 0.10
+steps_per_year <- round(365/6)
+sg <- s_year^(1/steps_per_year)
+gtad$s0 <- sg
+gtad$movement_distance <- 3
+# add loss parameters to tadpole params
+gtad$loss_int = green_dist$loss_int
+gtad$loss_slope = green_dist$loss_slope
+gtad$df_density <- 1560
+gtad$meta_successG <- green$meta_successG
+gtad$K_g <- green_par$K_g
+gtad$emig_meta <- green_par$emig_meta
+
+# take mean of all parameters
+btad_dist <- lapply(btad, function(x) median(x))
+gtad_dist <- lapply(gtad, function(x) median(x))
+
+## combine into one list
+ipm_dists <- list(
+  R.catesbeianus = modifyList(bull_dist,  bull_par),
+  R.clamitans   = modifyList(green_dist, green_par),
+  N.viridescens = modifyList(newt_dist,  newt_par),
+  Raca.tadpole = btad_dist,
+  Racl.tadpole = gtad_dist
+)
+
+# Save ipm dists
+save(ipm_dists, file = "ipm_dists.Rdata")
+
+```
+
+### ADD in field data
+```{r}
+# Species and site labels ----
+
+labels = c("hych"="H. chysoscelis","novi"="N. viridescens","pscr"="P. crucifer","psfe"="P. feriarum","raca"="R. catesbeianus","racl"="R. clamitans")
+species_levels = names(labels)
+
+# Set working directory ----
+setwd("C:/Users/demar/OneDrive/Documents/UTK/Research/Projects/multi_sp_competence/amphibianTN_field")
+# Load datasets ----
+
+
+### Site & Survey level environmental data ----
+# Read in dataset
+pond_data = read.csv("pond_data.csv", stringsAsFactors = FALSE) #Pond sampling level data (may have multiple rows for same survey when multiple water quality measurements (ysi) were taken for a single site)
+
+# Read in field descriptions
+comments_df <- read.table("pond_data_comments.txt", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+# Reattach comments
+for (i in seq_len(nrow(comments_df))) {
+  col_name <- comments_df$column[i]
+  col_comment <- comments_df$comment[i]
+  if (col_name %in% names(pond_data)) {
+    comment(pond_data[[col_name]]) <- col_comment
+  }
+}
+
+str(pond_data)
+
+pond_data_lim = pond_data[pond_data$site_id==2 | pond_data$site_id==7 | pond_data$site_id==10 | pond_data$site_id==15,]
+
+
+### Area ----
+pond_area = read.csv("pond_area_df.csv") #Sampling-level data of pond area for Lotus and William Hastie
+site_area = read.csv("site_area_df.csv") #Area of full site sampled (land and water)
+
+### Water temperature ----
+temperature = read.csv("temperature_dat.csv") #Site-level water temperature 
+
+### Abundance ----
+abundance = read.csv("abundance.csv") #Site and species-level abundance
+abundance$species = factor(abundance$species, levels = species_levels)
+
+
+## Interpolated data ----
+### Water temperature ----
+temperature_gam = read.csv("temp_gam_df.csv") #Site-level water temperature interpolated for the full year
+
+### Abundance ----
+abundance_gam = read.csv("abund_gam_df.csv") #Site and species-level abundance interpolated for the full year
+abundance_gam$species = factor(abundance_gam$species, levels = species_levels)
+
+
+abundance$species = factor(abundance$species, levels = species_levels)
+
+### Calculate tadpole
+#load data
+tadpole_abundance<-read.csv("amphibianTN_field/pipe_sampling.csv")
+
+# subset jsut for william hastie
+tad_abund <- subset(tadpole_abundance, subsite_id %like% "WH")
+head(tad_abund)
+#find mean abundance for each species
+# Individual species abundance
+
+# mean tadpoles per pipe
+mean_count <- mean(tad_abund$tadpole_count, na.rm = TRUE)
+
+# pipe area and pond area
+pipe_area <- 0.8  # m^2
+pond_radius <- 15 # m
+pond_area <- pi * pond_radius^2
+
+# by night
+night_density <- tadpole_abundance %>%
+  group_by(survey_id) %>% 
+  summarize(
+    mean_count = mean(tadpole_count),
+    density = mean_count / 0.8
+  )
+
+# Night abundance estimate
+night_density$abund_est <- night_density$density*pond_area
+
+mean(night_density$abund_est) # approx 1000 tadpoles
+
+
+### boot strap it to check
+boot_abund <- replicate(5000, {
+  m <- mean(sample(night_density$density, replace = TRUE))
+  m * pond_area
+})
+
+quantile(boot_abund, c(0.025, 0.5, 0.975)) # ~2000
+
+## Figure out what proportion of total tadpoles are bullfrogs vs green frogs
+# adult density
+N_g <- 238
+N_b <- 23
+
+#clutch size
+c_g <- 5000
+c_b <- 15000
+# surval of egg to tadpole
+s = 0.10 # survival rate or eggs
+
+#total average tadpoles in pond
+
+total_tads <- 2000
+
+## find out proportion of tadpoles
+
+## Relative contribution (egg × clutch × survival)
+T_g_rel <- N_g * c_g * s
+T_b_rel <- N_b * c_b * s
+
+## Species proportions
+p_g <- T_g_rel / (T_g_rel + T_b_rel)
+p_b <- T_b_rel / (T_g_rel + T_b_rel)
+
+p_g
+p_b
+
+## Apply proportions to total observed tadpoles
+greenfrog_tads  <- p_g * total_tads
+bullfrog_tads   <- p_b * total_tads
+
+greenfrog_tads # 3400
+bullfrog_tads # 1000
+
+## Bootstrap to get CI
+B <- 5000 # sims
+# bootstrap storage
+p_g_boot <- numeric(B)
+p_b_boot <- numeric(B)
+green_tads_boot <- numeric(B)
+bull_tads_boot  <- numeric(B)
+
+for (i in 1:B) {
+  
+  # Bootstrap adult numbers (±10%)
+  N_g_i <- rnorm(1, mean = 238, sd = 0.10 * 238)
+  N_b_i <- rnorm(1, mean = 23,  sd = 0.10 * 23)
+  
+  # Bootstrap clutch sizes (SD = 10% of mean)
+  c_g_i <- rnorm(1, mean = 5000,  sd = 0.10 * 5000)
+  c_b_i <- rnorm(1, mean = 15000, sd = 0.10 * 15000)
+  
+  # Bootstrap survival (uniform or beta)
+  s_i <- runif(1, 0.10, 0.20)   # survival between 10%–20%
+  
+  # Bootstrap uncertainty in total tadpole abundance
+  total_tads_i <- rnorm(1, mean = 2000, sd = 0.10 * 2000)
+  
+  # Compute relative contributions
+  T_g_rel_i <- N_g_i * c_g_i * s_i
+  T_b_rel_i <- N_b_i * c_b_i * s_i
+  
+  # Species proportions
+  p_g_boot[i] <- T_g_rel_i / (T_g_rel_i + T_b_rel_i)
+  p_b_boot[i] <- 1 - p_g_boot[i]
+  
+  # Apply to total abundance
+  green_tads_boot[i] <- p_g_boot[i] * total_tads_i
+  bull_tads_boot[i]  <- p_b_boot[i] * total_tads_i
+}
+
+# Summaries
+quantile(p_g_boot, c(0.025, 0.5, 0.975))
+quantile(p_b_boot, c(0.025, 0.5, 0.975))
+
+quantile(green_tads_boot, c(0.025, 0.5, 0.975))
+quantile(bull_tads_boot, c(0.025, 0.5, 0.975))
+bull_ci <- quantile(bull_tads_boot,  c(0.025, 0.5, 0.975))
+green_ci <- quantile(green_tads_boot, c(0.025, 0.5, 0.975))
+
+# 
+# density (tadpoles per m^2)
+density_est <- mean_count / pipe_area
+
+# abundance
+abundance_est <- density_est * pond_area
+
+abundance_est
+
+```
+
+# Calculate true R0 for each species
+
+## Single Species R0
+
+### Bullfrog adults
+
+```{r}
+source("multi_sp_fxns_q1.R")
+n = 200 
+
+# set varying densities
+DF_density = seq(1, 100, len = n)
+
+movement_vals <- seq(1, 200, len = n)  # movement distances in m2
+
+community_list <- list(
+  #community1 = c("N.viridescens"),  # Newt
+  #community1 = c("R.clamitans")  # Green Frog
+  community1 = c("R.catesbeianus") # Bullfrog
+  #community4 = c("Racl.tadpole"), # Green Frog Tadpole
+ # community2 = c("Raca.tadpole")) # Bullfrog Tadpole
+)
+
+R0_res <- list()
+# loop over communities
+for (com in names(community_list)) {
+
+  # pull vector of species in each community
+  species_list <- community_list[[com]]
+  res <- vector("list", length(DF_density) * length(movement_vals))
+  # record row
+  count <- 1
+  # loop over zoospore densities and movement values
+  for (d in DF_density) {
+    for (mv in movement_vals) {
+      # copy params so we don't leak changes across iterations
+      ipm_d <- ipm_dists
+      # set movement for all species in this community (works for 1+ species)
+      for (sp in species_list) {
+        ipm_d[[sp]]$movement_distance <- mv
+        ipm_d[[sp]]$df_density<- d
+      }
+      
+      # calculate R0
+      R0_val <- compute_R0_stage(
+          ipm_d,
+          stage = "adult",
+         adult_name = sp,
+          tadpole_name = "Raca.tadpole", #ignores   
+        pond_diameter = 22,
+        lower = -15, upper = 18, bins = 150
+)
+      # store results as a row in a list
+      res[[count]] <- data.frame(
+        community = com,
+        movement = mv,
+        density = d,
+        R0 = R0_val,
+        stringsAsFactors = FALSE
+      )
+      count <- count + 1
+    }
+  }
+  # bind the rows
+  R0_res[[com]] <- do.call(rbind, res)
+}
+
+# bind all communities into a single df 
+R0_var <- do.call(rbind, R0_res)
+
+community_labels <- sapply(community_list, function(sp) paste(sp, collapse = " + "))
+
+## Find Host density per liter or pond volume
+
+per_L <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)
+
+per_m3 <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)/1000
+
+bull_df <- R0_var %>%
+  filter(is.finite(R0)) %>%
+  mutate(
+    community_lab = recode(as.character(community), !!!community_labels),
+    host_kL = (density/per_L) * 1000,
+    host_m3 = density/per_m3,
+    movement_L = movement * 1000
+  )
+
+save(bull_df, file = "bull_r0_df.RData")
+```
+
+### Bull Tadpole
+
+```{r}
+source("multi_sp_fxns_q1.R")
+n = 200 # change back to 50
+
+# set varying densities
+DF_density = seq(1, 800, len = n)
+
+movement_vals <- seq(1, 20, len = n)  # movement distances in m
+
+
+community_list <- list(
+  #community1 = c("N.viridescens")  # Newt
+  #community1 = c("R.clamitans")  # Green Frog
+  #community1 = c("R.catesbeianus") # Bullfrog
+  #community4 = c("Racl.tadpole"), # Green Frog Tadpole
+ community1 = c("Raca.tadpole")) # Bullfrog Tadpole
+
+
+R0_res <- list()
+# loop over communities
+for (com in names(community_list)) {
+
+  # pull vector of species in each community
+  species_list <- community_list[[com]]
+  res <- vector("list", length(DF_density) * length(movement_vals))
+  # record row
+  count <- 1
+  # loop over zoospore densities and movement values
+  for (d in DF_density) {
+    for (mv in movement_vals) {
+      # copy params so we don't leak changes across iterations
+      ipm_d <- ipm_dists
+      # set movement for all species in this community 
+      for (sp in species_list) {
+        ipm_d[[sp]]$movement_distance <- mv
+        ipm_d[[sp]]$df_density<- d
+      }
+      
+      # calculate R0
+     R0_val <- compute_R0_stage(
+        ipm_d,
+        stage = "tadpole",
+        adult_name = "R.catesbeianus", #ignores
+        tadpole_name = sp,
+        pond_diameter = 22,
+        lower = -15, upper = 18, bins = 150,
+        include_metamorphosis_loss = TRUE
+      )
+      # store results as a row in a list
+      res[[count]] <- data.frame(
+        community = com,
+        movement = mv,
+        density = d,
+        R0 = R0_val,
+        stringsAsFactors = FALSE
+      )
+      count <- count + 1
+    }
+  }
+  # bind the rows
+  R0_res[[com]] <- do.call(rbind, res)
+}
+
+# bind all communities into a single df 
+R0_varT <- do.call(rbind, R0_res)
+
+
+
+community_labels <- sapply(community_list, function(sp) paste(sp, collapse = " + "))
+
+## Find Host density per liter or pond volume
+
+per_L <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)
+
+per_m3 <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)/1000
+
+tad_df <- R0_varT %>%
+  filter(is.finite(R0)) %>%
+  mutate(
+    community_lab = dplyr::recode(as.character(community), !!!community_labels),
+    host_kL = (density/per_L) * 1000,
+    host_m3 = density/per_m3,
+    movement_L = movement * 1000
+  )
+
+save(tad_df, file = "btad_r0_df.RData")
+```
+
+### Green Frog
+
+```{r}
+source("multi_sp_fxns_q1.R")
+n = 200 # change back to 50
+
+# set varying densities
+DF_density = seq(1, 800, len = n)
+
+movement_vals <- seq(1, 200, len = n)  # movement distances in m
+
+community_list <- list(
+  #community1 = c("N.viridescens"),  # Newt
+  community1 = c("R.clamitans")  # Green Frog
+  #community2 = c("R.catesbeianus"), # Bullfrog
+  #community4 = c("Racl.tadpole"), # Green Frog Tadpole
+ # community2 = c("Raca.tadpole")) # Bullfrog Tadpole
+)
+
+R0_res <- list()
+# loop over communities
+for (com in names(community_list)) {
+
+  # pull vector of species in each community
+  species_list <- community_list[[com]]
+  res <- vector("list", length(DF_density) * length(movement_vals))
+  # record row
+  count <- 1
+  # loop over zoospore densities and movement values
+  for (d in DF_density) {
+    for (mv in movement_vals) {
+      # copy params so we don't leak changes across iterations
+      ipm_d <- ipm_dists
+      # set movement for all species in this community
+      for (sp in species_list) {
+        ipm_d[[sp]]$movement_distance <- mv
+        ipm_d[[sp]]$df_density<- d
+      }
+      adult_name <- community_list[[1]]
+      # calculate R0
+      R0_val <- compute_R0_stage(
+          ipm_d,
+          stage = "adult",
+         adult_name = adult_name,
+          tadpole_name = "Racl.tadpole", #ignores   
+        pond_diameter = 22,
+        lower = -15, upper = 18, bins = 150
+)
+      # store results as a row in a list
+      res[[count]] <- data.frame(
+        community = com,
+        movement = mv,
+        density = d,
+        R0 = R0_val,
+        stringsAsFactors = FALSE
+      )
+      count <- count + 1
+    }
+  }
+  # bind the rows
+  R0_res[[com]] <- do.call(rbind, res)
+}
+
+
+R0_varg <- do.call(rbind, res)
+
+community_labels <- sapply(community_list, function(sp) paste(sp, collapse = " + "))
+
+## Find Host density per liter or pond volume
+
+per_L <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)
+
+per_m3 <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)/1000
+
+var_df <- R0_varg %>%
+  filter(is.finite(R0)) %>%
+  mutate(
+    community_lab = dplyr::recode(as.character(community), !!!community_labels),
+    host_kL = (density/per_L) * 1000,
+    host_m3 = density/per_m3,
+    movement_L = movement * 1000
+  )
+
+save(var_df, file = "green_r0_df.RData")
+```
+
+### Green Frog Tadpole
+
+```{r}
+source("multi_sp_fxns_q1.R")
+n = 200 # change back to 50
+
+# set varying densities
+DF_density = seq(1, 2000, len = n)
+
+movement_vals <- seq(1, 20, len = n)  # movement distances in m
+
+
+community_list <- list(
+  #community1 = c("N.viridescens")  # Newt
+  #community1 = c("R.clamitans")  # Green Frog
+  #community1 = c("R.catesbeianus") # Bullfrog
+  community4 = c("Racl.tadpole")) # Green Frog Tadpole
+ #community1 = c("Raca.tadpole")) # Bullfrog Tadpole
+
+
+R0_res <- list()
+# loop over communities
+for (com in names(community_list)) {
+
+  # pull vector of species in each community
+  species_list <- community_list[[com]]
+  res <- vector("list", length(DF_density) * length(movement_vals))
+  # record row
+  count <- 1
+  # loop over zoospore densities and movement values
+  for (d in DF_density) {
+    for (mv in movement_vals) {
+      # copy params so we don't leak changes across iterations
+      ipm_d <- ipm_dists
+      # set movement for all species in this community 
+      for (sp in species_list) {
+        ipm_d[[sp]]$movement_distance <- mv
+        ipm_d[[sp]]$df_density<- d
+      }
+      # calculate R0
+
+     R0_val <- compute_R0_stage(
+        ipm_d,
+        stage = "tadpole",
+        adult_name = "R.clamitans", #ignores
+        tadpole_name = sp,
+        pond_diameter = 22,
+        lower = -15, upper = 18, bins = 150,
+        include_metamorphosis_loss = TRUE
+      )
+      # store results as a row in a list
+      res[[count]] <- data.frame(
+        community = com,
+        movement = mv,
+        density = d,
+        R0 = R0_val,
+        stringsAsFactors = FALSE
+      )
+      count <- count + 1
+    }
+  }
+  # bind the rows
+  R0_res[[com]] <- do.call(rbind, res)
+}
+
+# bind all communities into a single df 
+R0_var <- do.call(rbind, R0_res)
+
+community_labels <- sapply(community_list, function(sp) paste(sp, collapse = " + "))
+
+## Find Host density per liter or pond volume
+
+per_L <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)
+
+per_m3 <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)/1000
+
+gtad_df <- R0_var %>%
+  filter(is.finite(R0)) %>%
+  mutate(
+    community_lab = recode(as.character(community), !!!community_labels),
+    host_kL = (density/per_L) * 1000,
+    host_m3 = density/per_m3,
+    movement_L = movement * 1000
+  )
+
+save(gtad_df, file = "gtad_r0_df.RData")
+```
+
+### Newts
+
+```{r}
+
+source("multi_sp_fxns_q1.R")
+n = 200 # change back to 50
+
+# set varying densities
+DF_density = seq(1, 1000, len = n)
+
+
+movement_vals <- seq(1, 30, len = n)  # movement distances in m
+
+community_list <- list(
+  community1 = c("N.viridescens")  # Newt
+  #community1 = c("R.clamitans")  # Green Frog
+  #community1 = c("R.catesbeianus") # Bullfrog
+  #community4 = c("Racl.tadpole"), # Green Frog Tadpole
+ # community2 = c("Raca.tadpole")) # Bullfrog Tadpole
+)
+
+R0_res <- list()
+# loop over communities
+for (com in names(community_list)) {
+
+  # pull vector of species in each community
+  species_list <- community_list[[com]]
+  res <- vector("list", length(DF_density) * length(movement_vals))
+  # record row
+  count <- 1
+  # loop over zoospore densities and movement values
+  for (d in DF_density) {
+    for (mv in movement_vals) {
+      # copy params so we don't leak changes across iterations
+      ipm_d <- ipm_dists
+      # set movement for all species in this community
+      for (sp in species_list) {
+        ipm_d[[sp]]$movement_distance <- mv
+        ipm_d[[sp]]$df_density<- d
+      }
+      adult_name <- community_list[[1]]
+      # calculate R0
+      R0_val <- compute_R0_stage(
+          ipm_d,
+          stage = "adult",
+         adult_name = sp,
+          tadpole_name = "Racl.tadpole", #ignores   
+        pond_diameter = 22,
+        lower = -15, upper = 18, bins = 150
+)
+      # store results as a row in a list
+      res[[count]] <- data.frame(
+        community = com,
+        movement = mv,
+        density = d,
+        R0 = R0_val,
+        stringsAsFactors = FALSE
+      )
+      count <- count + 1
+    }
+  }
+  # bind the rows
+  R0_res[[com]] <- do.call(rbind, res)
+}
+
+# bind all communities into a single df 
+R0_varN <- do.call(rbind, R0_res)
+
+community_labels <- sapply(community_list, function(sp) paste(sp, collapse = " + "))
+
+## Find Host density per liter or pond volume
+
+per_L <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)
+
+per_m3 <- calculate_pond_volume(diameter = 22, avg_depth = 0.5)/1000
+
+newt_df <- R0_varN %>%
+  filter(is.finite(R0)) %>%
+  mutate(
+    community_lab = recode(as.character(community), !!!community_labels),
+    host_kL = (density/per_L) * 1000,
+    host_m3 = density/per_m3,
+    movement_L = movement * 1000
+  )
+save(newt_df, file = "newt_r0_df.RData")
+```
+
+
+#Multi-stage Bullfrog R0
+```{r}
+source("multi_sp_fxns_q1.R")
+
+n <- 200
+Ntot_vals <- seq(1, 750 , len = n) # total bullfrog abundance in pond
+meff_vals <- seq(1, 100, len = n) # effective movemetn
+k_vals <- seq(0.1, 5, len = n)
+
+sp_list <- c("R.catesbeianus", "Raca.tadpole")
+# baseline densities
+base_N <- sapply(sp_list, function(sp) ipm_dists[[sp]]$df_density)
+
+# proportions
+p <- base_N / sum(base_N)
+p
+sum(p)
+
+# choose fixed stage ratio and movement ratio 
+p_adult <- unname(p[1])
+mA_obs  <- 30
+mT_obs  <- 6
+r_move  <- mA_obs / mT_obs # adults move 1.6 x farther than tadpoles
+
+res <- vector("list", length(Ntot_vals) * length(meff_vals))
+count <- 1
+
+for (Ntot in Ntot_vals) {
+  for (k in k_vals) {
+
+    # split total density into stage-specific densities
+    N_A <- p_adult * Ntot
+    N_T <- (1 - p_adult) * Ntot
+
+    # convert effective movement -> stage-specific movements using ratio r_move
+    m_T <- k * mT_obs
+    m_A <- k * mA_obs
+
+    ipm_d <- ipm_dists
+    ipm_d[["R.catesbeianus"]]$df_density <- N_A
+    ipm_d[["Raca.tadpole"]]$df_density  <- N_T
+
+    ipm_d[["R.catesbeianus"]]$movement_distance <- m_A
+    ipm_d[["Raca.tadpole"]]$movement_distance  <- m_T
+
+    R0_val <- compute_bullfrog_2stage_R0_current(
+      ipm_d = ipm_d,
+      adult_name = "R.catesbeianus",
+      tadpole_name = "Raca.tadpole",
+      pond_diameter = 22,
+      lower = -15, upper = 18, bins = 150
+    )
+
+    res[[count]] <- data.frame(
+      Ntot = Ntot,
+      p_adult = p_adult,
+      N_adult = N_A,
+      N_tad   = N_T,
+      k = k,
+      m_adult = m_A,
+      m_tad   = m_T,
+      R0 = R0_val
+    )
+    count <- count + 1
+  }
+}
+
+R0_var <- do.call(rbind, res)
+
+# observed counts
+N_A <- 23
+N_T <- 450
+
+# pond volume
+per_m3 <- calculate_pond_volume(diameter = 22, avg_depth = 0.5) / 1000
+
+# observed total density (y-axis value)
+obs_total_density_m3 <- (N_A + N_T) / per_m3
+max_density_m3 <- 720/per_m3
+min_density_m3 <- 310/per_m3
+
+# observed movements (same units as x-axis)
+m_A <- 30   # adult
+m_T <- 6   # tadpole
+
+# density-weighted average movement
+obs_mv <- (N_A * m_A + N_T * m_T) / (N_A + N_T)
+
+bf_df <- R0_var %>%
+  mutate(host_m3_total = Ntot / per_m3) %>%
+  filter(is.finite(R0))
+
+save(bf_df, file = "multi_bf_r0_df.RData")
+
+```
+
+
+
+# Multi-stage green frog
+```{r}
+
+source("multi_sp_fxns_q1.R")
+ 
+n <- 200
+Ntot_vals <- seq(100, 2800, len = n)        # total bullfrog abundance in pond
+#meff_vals <- seq(1, 200, len = n)  
+k_vals <- seq(0.1, 5, len = n)
+ 
+sp_list <- c("R.clamitans", "Racl.tadpole")
+ # baseline densities
+base_N <- sapply(sp_list, function(sp) ipm_dists[[sp]]$df_density)
+ 
+# proportions
+p <- base_N / sum(base_N)
+p
+
+sum(p)
+
+ 
+# choose fixed stage ratio and movement ratio
+ p_adult <- unname(p[1])
+mA_obs  <- 40
+mT_obs  <- 3
+res <- vector("list", length(Ntot_vals) * length(meff_vals))
+count <- 1
+
+for (Ntot in Ntot_vals) {
+ for (k in k_vals) {
+
+   # split total density into stage-specific densities
+   N_A <- p_adult * Ntot
+   N_T <- (1 - p_adult) * Ntot
+
+   # convert effective movement -> stage-specific movements using ratio r_move
+   m_T <- mT_obs * k
+   m_A <- mA_obs * k
+
+   ipm_d <- ipm_dists
+   ipm_d[["R.clamitans"]]$df_density <- N_A
+   ipm_d[["Racl.tadpole"]]$df_density  <- N_T
+
+   ipm_d[["R.clamitans"]]$movement_distance <- m_A
+   ipm_d[["Racl.tadpole"]]$movement_distance  <- m_T
+   
+   R0_val <- compute_bullfrog_2stage_R0_current(
+     ipm_d = ipm_d,
+     adult_name = "R.clamitans",
+     tadpole_name = "Racl.tadpole",
+     pond_diameter = 22,
+     lower = -15, upper = 18, bins = 150
+   )
+
+   res[[count]] <- data.frame(
+     Ntot = Ntot,
+     p_adult = p_adult,
+     N_adult = N_A,
+     N_tad   = N_T,
+     k = k,
+     m_adult = m_A,
+     m_tad   = m_T,
+     R0 = R0_val
+   )
+   count <- count + 1
+ }
+}
+
+ R0_varg <- do.call(rbind, res)
+
+# observed counts
+N_A<- ipm_dists[["R.clamitans"]]$df_density
+N_T <- ipm_dists[["Racl.tadpole"]]$df_density
+
+# pond volume
+per_m3 <- calculate_pond_volume(diameter = 22, avg_depth = 0.5) / 1000
+
+# observed total density (y-axis value)
+obs_total_density_m3 <- (N_A + N_T) / per_m3
+max_density_m3 <- 2550/per_m3
+min_density_m3 <- 1300/per_m3
+
+# observed movements (same units as x-axis)
+m_A <- ipm_dists[["R.clamitans"]]$movement_distance   # adult
+m_T <- ipm_dists[["Racl.tadpole"]]$movement_distance   # tadpole
+
+# density-weighted average movement
+obs_mv <- (N_A * m_A + N_T * m_T) / (N_A + N_T)
+
+gf_df <- R0_varg %>%
+  mutate(host_m3_total = Ntot / per_m3) %>%
+  filter(is.finite(R0))
+
+save(gf_df, file = "multi_gf_r0_df.RData")
+```
+# All species
+
+```{r}
+
+source("multi_sp_fxns_q1.R")
+
+n <- 200
+Ntot_vals <- seq(100, 3400, len = n)  
+k_vals <- seq(0.1, 5, len = n)
+
+# calculate density ratio
+sp_comm <- c("R.clamitans", "Racl.tadpole", "R.catesbeianus", "Raca.tadpole")
+
+# baseline densities
+base_N <- sapply(sp_comm, function(sp) ipm_dists[[sp]]$df_density)
+
+# proportions
+p <- base_N / sum(base_N)
+p
+sum(p) 
+
+## Distance moved
+mAg_obs  <- ipm_dists[["R.clamitans"]]$movement_distance
+mTg_obs  <- ipm_dists[["Racl.tadpole"]]$movement_distance
+mAb_obs  <- ipm_dists[["R.catesbeianus"]]$movement_distance
+mTb_obs  <- ipm_dists[["Raca.tadpole"]]$movement_distance
+
+
+res <- vector("list", length(Ntot_vals) * length(k_vals))
+count <- 1
+
+for (Ntot in Ntot_vals) {
+  for (k in k_vals) {
+
+    # split total density into stage-specific densities
+    N_Ag <- unname(p[1]) * Ntot
+    N_Tg <- unname(p[2]) * Ntot
+    
+    N_Ab <- unname(p[3]) * Ntot
+    N_Tb <- unname(p[4]) * Ntot
+
+    # scale df density
+    ipm_d <- ipm_dists
+    ipm_d[["R.clamitans"]]$df_density <- N_Ag
+    ipm_d[["Racl.tadpole"]]$df_density  <- N_Tg
+    ipm_d[["R.catesbeianus"]]$df_density <- N_Ab
+    ipm_d[["Raca.tadpole"]]$df_density  <- N_Tb
+    
+    # scale movemetn
+    ipm_d[["R.clamitans"]]$movement_distance <- mAg_obs * k
+    ipm_d[["Racl.tadpole"]]$movement_distance  <- mTg_obs * k
+    ipm_d[["R.catesbeianus"]]$movement_distance <- mAb_obs * k
+    ipm_d[["Raca.tadpole"]]$movement_distance <- mTb_obs * k
+
+    R0_val <- compute_R0_stage_community(
+        species_list = sp_comm,
+        ipm_dists = ipm_d,
+        pond_diameter = 22,
+        lower = -15, upper = 18, bins = 150,
+        include_emigration = TRUE,
+        include_infect_then_meta = TRUE,
+        z_decay = 0.3
+        )
+    
+    res[[count]] <- data.frame(
+      Ntot = Ntot,
+      N_green = N_Ag,
+      N_gtad   = N_Tg,
+      N_bull = N_Ab,
+      N_btad   = N_Tb,
+      k = k,
+      m_Ag = mAg_obs * k,
+      m_tg = mTg_obs * k,
+      m_Ab = mAb_obs * k,
+      m_Tb = mTb_obs * k,
+      R0 = R0_val
+    )
+    count <- count + 1
+  }
+}
+
+# bind all communities into a single df 
+R0_var_all <- do.call(rbind, res)
+
+save(R0_var_all, file = "R0_all_df.RData")
+
+```
+
+
+## Sensitivity Analysis
+
+
+# Functions for elasticity
+
+```{r}
+setwd("C:/Users/demar/OneDrive/Documents/UTK/Research/Projects/multi_sp_competence")
+
+source("multi_sp_fxns_q1.R")
+
+ipm_dists <- list(R.clamitans = green_dist, R.catesbeianus = bull_dist, Raca.tadpole = btad_dist, N.viridescens = newt_dist)
+
+
+species_list <- c("R.clamitans", "R.catesbeianus", "Raca.tadpole", "N.viridescens")
+
+sens_elas <- calculate_R0_elasticity(ipm_dists, species_list, delta = 0.01)
+
+```
+
+### Plot the elasticities and sensitivities
+
+```{r}
+library(tidyr)
+df_sens_elas <- sens_elas %>%
+  pivot_longer(cols = c(sensitivity, elasticity),
+               names_to = "metric",
+               values_to = "value")
+
+
+param_math <- c(
+  growth_int   = "G[0]",
+  growth_slope = "G[1]",
+  lambda_int   = "lambda[0]",
+  lambda_slope = "lambda[1]",
+  loss_int     = "L[0]",
+  loss_slope   = "L[1]",
+  trans_int    = "tau[0]",
+  trans_slope  = "tau[1]",
+  trans_exp    = "phi",
+  init_inf_int = "eta[0]",
+  init_inf_sigma = "sigma[eta]"
+)
+
+## convert ready labels
+sens_elas_labeled <- sens_elas %>%
+  mutate(param_label_math = param_math[parameter])
+
+# sensitivity plot
+
+ggplot(sens_elas %>% arrange(sensitivity) +
+       aes(x = reorder(parameter, sensitivity),
+           y = sensitivity,
+           fill = species)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(x = "Parameter",
+       y = "Sensitivity") +
+  theme_minimal(base_size = 14)
+
+# Elasticity plot
+
+elasticity_plot <- ggplot(sens_elas_labeled %>% arrange(elasticity),
+       aes(x = reorder(param_label_math, elasticity),
+           y = elasticity,
+           fill = species)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_x_discrete(labels = function(x) parse(text = x)) +
+  labs(x = "Parameter",
+       y = expression("Elasticity (% change in " * R[0] * " per 1% change in parameter)")) +
+  theme_minimal(base_size = 14) +
+    scale_fill_manual(values = c("R.catesbeianus" = "tan4", 
+                                "R.clamitans" = "forestgreen", 
+                                "Raca.tadpole" = "aquamarine3",
+                                "N.viridescens" = "darkorange3"))
+
+ggsave(elasticity_plot, filename = "plots/R0_elasticity.png", width = 10, height = 6)
+
+```
+
+
+# ZOOSPORE SURVIVAL CALCULATION
+```{r}
+
+# Woodhams et al. 2008: zoospore death hazards dZ (per hour)
+dZ_23  <- 1.6e-2   # 23.0 C
+dZ_145 <- 3.5e-3   # 14.5 C
+
+dt_days  <- 6
+dt_hours <- dt_days * 24
+
+#convert continuous-time hazard -> discrete-time probability over dt
+hazard_to_prob <- function(h, dt_hours) 1 - exp(-h * dt_hours)
+
+# linear interpolation at 21C
+T_target <- 21.0
+T1 <- 14.5
+T2 <- 23.0
+
+dZ_21 <- dZ_145 + (dZ_23 - dZ_145) *
+  (T_target - T1) / (T2 - T1)
+
+pdeath_21 <- hazard_to_prob(dZ_21, dt_hours)
+
+out <- data.frame(
+  temp_C = c(23.0, 21.0, 14.5),
+  dZ_per_hour = c(dZ_23, dZ_21, dZ_145),
+  p_death_6d = c(
+    hazard_to_prob(dZ_23, dt_hours),
+    pdeath_21,
+    hazard_to_prob(dZ_145, dt_hours)
+  ),
+  p_survive_6d = 1 - c(
+    hazard_to_prob(dZ_23, dt_hours),
+    pdeath_21,
+    hazard_to_prob(dZ_145, dt_hours)
+  )
+)
+
+print(out)
+
+
+
+```
+
+
